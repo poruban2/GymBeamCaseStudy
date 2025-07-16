@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation stack for a generic API data extractor:
+  EventBridge triggers a Lambda function at 7AM PRague time,
+  which then writes JSON data to a timestamped folder in an S3 bucket.
+
+Resources:
+  # S3 Bucket to store the extracted data
+  GymBeamS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: gym-beam-s3-bucket
+      Tags:
+        - Key: Project
+          Value: GymBeamApiExtractor
+    DeletionPolicy: Retain
+
+  # IAM Role for the Lambda Function
+  GymBeamLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3PutObjectPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Join ['', ['arn:aws:s3:::', !Ref GymBeamS3Bucket, '/*']]
+              - Effect: Allow 
+                Action: secretsmanager:GetSecretValue
+                Resource: arn:aws:secretsmanager:us-east-1:022499015662:secret:GolemioApiTokenSecret-sWwxZ2
+      Tags:
+        - Key: Project
+          Value: GymBeamApiExtractor
+
+  # Lambda Function
+  GymBeamTriggeredLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GymBeamTriggeredLambda
+      Handler: index.lambda_handler
+      Runtime: python3.9 
+      Role: !GetAtt GymBeamLambdaExecutionRole.Arn 
+      MemorySize: 128
+      Timeout: 30 
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref GymBeamS3Bucket 
+          GolemioAPIUrl: 'https://api.golemio.cz/v2/municipallibraries'
+      Code:
+        S3Bucket: gymbeam-lambda-python-bucket
+        S3Key: lambda-code.zip
+
+  # EventBridge Rule to trigger the Lambda every day 5AM UTC (7AM Prague)
+  GymBeamCRONRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: GymBeamCRON
+      Description: Triggers GymBeamTriggeredLambda every day at 7AM
+      ScheduleExpression: "cron(0 5 * * ? *)" # 7AM every day (5AM UTC, daylight saving breaks this)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt GymBeamTriggeredLambda.Arn
+          Id: GymBeamTriggeredLambdaTarget
+
+  # Permission for EventBridge to invoke the Lambda Function
+  GymBeamLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt GymBeamTriggeredLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GymBeamCRONRule.Arn 
+
+Outputs:
+  S3BucketName:
+    Description: The name of the S3 bucket created for storing data.
+    Value: !Ref GymBeamS3Bucket
+  LambdaFunctionName:
+    Description: The name of the Lambda function.
+    Value: !Ref GymBeamTriggeredLambda
+  EventBridgeRuleName:
+    Description: The name of the EventBridge Rule.
+    Value: !Ref GymBeamCRONRule
